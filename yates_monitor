@@ -50,6 +50,10 @@ index = """
 
             element.style.background = data.colour;
         }}
+
+        webSocket.onclose = function(){{
+            setTimeout(function(){{window.onload();}}, 1000);
+        }}
      }}
   </script>
 """.format(ip_addr = ip_addr)
