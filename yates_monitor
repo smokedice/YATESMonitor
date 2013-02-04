@@ -104,7 +104,6 @@ class Grx(object):
  
         global ip_addr, port
         self.browser = webkit.WebView()
-        self.browser.open('http://%s:%s' %(ip_addr, port))
         self.sw.add(self.browser)
 
         self.window.add(vbox)
@@ -113,6 +112,9 @@ class Grx(object):
     def destroy(self, widget, data = None):
         gtk.main_quit()
         return False
+
+    def open_page(self, page):
+        self.browser.open(page)
 
 class HolaListener(DatagramProtocol):
     NORM_COLOUR = 2
@@ -202,7 +204,10 @@ if __name__ == "__main__":
     factory.protocol = Client
     listenWS(factory)
 
-    if not server_mode: grx = Grx()
+    if not server_mode: 
+        grx = Grx()
+        reactor.callLater(1, lambda: grx.open_page('http://%s:%s' %(ip_addr, port)))
+
     listener = HolaListener(factory)
     reactor.listenMulticast(8005,
         listener, listenMultiple = True)
