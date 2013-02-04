@@ -1,0 +1,214 @@
+#!/usr/bin/env python
+from twisted.internet.task import LoopingCall
+from twisted.internet.protocol import DatagramProtocol
+from Queue import Empty
+from threading import RLock
+from twisted.internet import gtk2reactor
+gtk2reactor.install()
+import gtk, webkit, time, json, thread, time, socket, sys, fcntl, struct
+from twisted.internet import reactor
+from twisted.web import resource
+from twisted.web.server import Site
+from optparse import OptionParser
+from autobahn.websocket import WebSocketServerFactory, \
+   WebSocketServerProtocol, listenWS
+
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+ip_addr = socket.inet_ntoa(fcntl.ioctl(
+    s.fileno(),
+    0x8915,  # SIOCGIFADDR
+    struct.pack('256s', 'eth0')
+)[20:24])
+
+index = """
+  <style>
+    .peer {{
+        width:24%; float:left; text-align:center; 
+        margin-left: 1px; margin-bottom: 1px;
+        color: #FFFFFF; font-size:small;
+    }}  
+    body {{  margin: 0px; padding: 0px; }}
+  </style>
+  <script type="text/javascript">
+     window.onload = function() {{
+        peers = document.createElement('div');
+        peers.id = "peers";
+        document.body.appendChild(peers);
+
+        webSocket = new WebSocket("ws://{ip_addr}:9000");
+        webSocket.onmessage = function(e) {{
+            var data = JSON.parse(e.data);
+            var element = document.getElementById(data.mac);
+
+            if (element === null){{
+                element = document.createElement("div");
+                element.innerHTML = data.host;
+                element.id = data.mac;
+                element.className = "peer";
+                document.getElementById("peers").appendChild(element);
+            }}
+
+            element.style.background = data.colour;
+        }}
+     }}
+  </script>
+""".format(ip_addr = ip_addr)
+
+class Client(WebSocketServerProtocol):
+    def onOpen(self):
+        self.factory.register(self)
+
+    def connectionLost(self, reason):
+        WebSocketServerProtocol.connectionLost(self, reason)
+        self.factory.unregister(self)
+
+class BroadcastFactory(WebSocketServerFactory):
+    def __init__(self, *args, **kwargs):
+        WebSocketServerFactory.__init__(self, *args, **kwargs)
+        self.clients = []
+        self.cache = {}
+
+    def register(self, client):
+        if client in self.clients: return
+        self.clients.append(client)
+
+        for mac, packet in self.cache.items():
+            client.sendMessage(packet)
+
+    def unregister(self, client):
+        if client not in self.clients: return
+        self.clients.remove(client)
+            
+    def broadcast(self, host, mac, random, colour):
+        packet = json.dumps({ 'host' : host, 'mac' : mac, 
+            'random' : random, 'colour' : colour })
+        self.cache[mac] = packet
+
+        for client in self.clients:
+            client.sendMessage(packet)
+
+class Grx(object):
+    def __init__(self):
+        self.window = gtk.Window(gtk.WINDOW_TOPLEVEL)
+        self.window.set_title("YATES")
+        self.window.set_size_request(400, 200)
+        self.window.set_border_width(10)
+        self.window.set_position(gtk.WIN_POS_CENTER_ALWAYS)
+        self.window.connect("destroy", self.destroy)
+
+        vbox = gtk.VBox(False, 8)
+        self.sw = gtk.ScrolledWindow()
+        self.sw.set_shadow_type(gtk.SHADOW_ETCHED_IN)
+        self.sw.set_policy(gtk.POLICY_AUTOMATIC, gtk.POLICY_AUTOMATIC)
+        vbox.pack_start(self.sw, True, True, 0)
+ 
+        global ip_addr, port
+        self.browser = webkit.WebView()
+        self.browser.open('http://%s:%s' %(ip_addr, port))
+        self.sw.add(self.browser)
+
+        self.window.add(vbox)
+        self.window.show_all()
+
+    def destroy(self, widget, data = None):
+        gtk.main_quit()
+        return False
+
+class HolaListener(DatagramProtocol):
+    NORM_COLOUR = 2
+    COLOURS = [
+        # First two are special
+        # [0] new peer
+        # [1] ip addr change
+        '#000000', '#FFA500',
+        # Normal colours
+        '#254117', '#347235', 
+        '#4E9258', '#4AA02C', 
+        '#667C26', '#EAC117', 
+        '#D4A017', '#AF7817', 
+        '#7E2217', '#FF0000'
+    ]
+
+    def __init__(self, factory):
+        self.factory = factory
+        self.peers = {}
+        self.loop = LoopingCall(self._tick)
+        self.loop.start(2.0)
+
+    def startProtocol(self):
+        """ Called when transport is connected """
+        self.transport.setTTL(5)
+        self.transport.joinGroup('224.6.6.6')
+
+    def datagramReceived(self, data, (host, port)):
+        macAddr, randomBits = data.split(':', 1)
+        colour = self.define_colour(host, macAddr, randomBits)
+
+        if not colour: return
+        self.broadcast(host, macAddr, randomBits, colour)
+
+    def broadcast(self, host, mac, random, colour):
+        self.factory.broadcast(host, mac, random, colour)
+
+    def define_colour(self, host, mac_addr, random_bits):
+        if mac_addr not in self.peers.keys():
+            self.peers[mac_addr] = (host, random_bits, 0, time.time())
+            return self.COLOURS[0]
+
+        old_host, old_random, colour, _ = self.peers[mac_addr]
+
+        if old_host != host: new_colour = 0
+        elif old_random != random_bits: new_colour = 1
+        elif colour < self.NORM_COLOUR: new_colour = self.NORM_COLOUR
+        else: new_colour = None
+
+        self.peers[mac_addr] = (host, random_bits, 
+            new_colour or colour, time.time())
+        return new_colour if not new_colour else self.COLOURS[new_colour]
+
+    def _tick(self):
+        cur_time = time.time()
+
+        for mac, values in self.peers.items():
+            host, random, colour, late_update = values
+            if cur_time - late_update < 2: continue
+
+            if colour < self.NORM_COLOUR:
+                colour = self.NORM_COLOUR
+            elif colour < len(self.COLOURS) - 1:
+                colour += 1
+
+            self.peers[mac] = (host, random, colour, cur_time)
+            self.broadcast(host, mac, random, self.COLOURS[colour])
+
+class RootResource(resource.Resource):
+    def render_GET(self, request):
+        global index
+        return index
+
+if __name__ == "__main__":
+    parser = OptionParser(usage = 'Monitor YATES clients for signs of life')
+    parser.add_option('--server', '-s',
+        help='Execute monitor with no GUI', default=False,
+        action = 'store_true')
+    parser.add_option('--port', '-p', type='int',
+        help='Web server port number', default=8080)
+    
+    options, args = parser.parse_args()
+    port = options.port
+    server_mode = options.server
+
+    factory = BroadcastFactory("ws://localhost:9000", debug = False)
+    factory.protocol = Client
+    listenWS(factory)
+
+    if not server_mode: grx = Grx()
+    listener = HolaListener(factory)
+    reactor.listenMulticast(8005,
+        listener, listenMultiple = True)
+
+    root = resource.Resource()
+    root.putChild("", RootResource())
+    factory = Site(root)
+    reactor.listenTCP(port, factory)
+    reactor.run()
