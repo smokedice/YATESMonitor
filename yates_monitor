@@ -124,8 +124,7 @@ class HolaListener(DatagramProtocol):
     NORM_COLOUR = 2
     COLOURS = [
         # First two are special
-        # [0] new peer
-        # [1] ip addr change
+        # [0] new peer, [1] ip addr change
         '#000000', '#FFA500',
         # Normal colours
         '#254117', '#347235', 
@@ -165,7 +164,7 @@ class HolaListener(DatagramProtocol):
 
         if old_host != host: new_colour = 0
         elif old_random != random_bits: new_colour = 1
-        elif colour < self.NORM_COLOUR: new_colour = self.NORM_COLOUR
+        elif colour != self.NORM_COLOUR: new_colour = self.NORM_COLOUR
         else: new_colour = None
 
         self.peers[mac_addr] = (host, random_bits, 
